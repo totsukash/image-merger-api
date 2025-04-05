@@ -1,0 +1,65 @@
+{
+    "info": {
+        "_postman_id": "d8e0f1a2-b3c4-4d5e-8f9a-0b1c2d3e4f5a",
+        "name": "Image Merger API",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+        "description": "画像とPDFをマージするAPIのPostmanコレクションです。"
+    },
+    "item": [
+        {
+            "name": "Merge Files",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "files[]",
+                            "type": "file",
+                            "description": "マージしたい画像（PNG, JPG/JPEG）またはPDFファイルを選択します。複数選択可能です。",
+                            "src": []
+                        }
+                    ]
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/merge",
+                    "host": [
+                        "{{baseUrl}}"
+                    ],
+                    "path": [
+                        "merge"
+                    ]
+                },
+                "description": "複数の画像（PNG, JPG/JPEG）やPDFファイルをアップロードし、一つのPDFファイルにマージします。\n\n**使い方:**\n1. このリクエストを選択し、`Body` タブを開きます。\n2. `form-data` が選択されていることを確認します。\n3. `files[]` というキーの行で、`VALUE` 列のテキスト入力欄（初期状態では空）をクリックします。\n4. ドロップダウンメニューが表示されるので、`File` を選択します。\n5. `VALUE` 列に `Select Files` ボタンが表示されるので、これをクリックしてマージしたいローカルのファイルを選択します（ShiftキーやCtrl/Cmdキーを使って複数選択できます）。\n6. 必要に応じて、`files[]` の行を複製してさらにファイルを追加することも可能です。\n7. APIサーバーが起動していることを確認し、`Send` ボタンをクリックします。\n8. レスポンスとしてマージされたPDFファイルが返却されます。Postman の `Save Response` -> `Save to a file` で保存できます。"
+            },
+            "response": []
+        },
+        {
+            "name": "Health Check",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{baseUrl}}/health",
+                    "host": [
+                        "{{baseUrl}}"
+                    ],
+                    "path": [
+                        "health"
+                    ]
+                },
+                "description": "APIサーバーの状態を確認します。\n`{\"status\":\"ok\"}` が返れば正常です。"
+            },
+            "response": []
+        }
+    ],
+    "variable": [
+        {
+            "key": "baseUrl",
+            "value": "http://localhost:8080",
+            "type": "string",
+            "description": "APIサーバーのベースURLです。"
+        }
+    ]
+} 
