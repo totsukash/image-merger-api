@@ -1,12 +1,13 @@
 package main
 
 import (
+	"bytes" // bytes パッケージをインポート
 	"fmt"
 	_ "image/jpeg" // jpeg形式のサポート
 	_ "image/png"  // png形式のサポート
 	"io"
-	"net/http"
-	"os"
+	"mime/multipart" // multipart.FileHeader のためにインポート
+	"net/http"       // エラー処理のために残すが、ファイル操作は減らす
 	"path/filepath"
 	"strings"
 
@@ -52,111 +53,131 @@ func mergeHandler(c *gin.Context) {
 		return
 	}
 
-	// 一時ディレクトリを作成
-	tempDir := "./temp_uploads"
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("一時ディレクトリ作成失敗: %s", err.Error())})
-		return
-	}
-	// 関数終了時に一時ディレクトリを削除
-	defer os.RemoveAll(tempDir)
-
-	// マージ対象となるPDFファイルのパスリスト
-	pdfFilePathsToMerge := []string{}
-
-	// pdfcpuの設定 (デフォルトを使用)
-	config := model.NewDefaultConfiguration()
-	// 必要であればここでconfigをカスタマイズする
-	// 例: config.ValidationMode = model.ValidationRelaxed
-
-	for _, file := range files {
-		ext := strings.ToLower(filepath.Ext(file.Filename))
-		originalFilePath := filepath.Join(tempDir, file.Filename)
-
-		// アップロードされたファイルを一時ディレクトリに保存
-		if err := c.SaveUploadedFile(file, originalFilePath); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("ファイル保存失敗 %s: %s", file.Filename, err.Error())})
-			return
-		}
-
-		switch ext {
-		case ".png", ".jpg", ".jpeg":
-			// 画像をPDFに変換 (pdfcpu APIを使用)
-			imagePdfPath := filepath.Join(tempDir, strings.TrimSuffix(file.Filename, ext)+".pdf")
-			// ImportImagesFile は画像ファイルのリストを受け取るので、一つだけのリストを作成
-			imageFiles := []string{originalFilePath}
-			// 画像インポート設定
-			// デフォルト設定を使用
-			// imp := &model.ImportConfig{} // pdfcpu v0.5.0 以降の正しい型 - 未定義エラー発生
-			// 必要に応じて設定を変更: 例 imp.PageDim = model.PageSizeA4.ToRect()
-
-			// imp に nil を渡し、デフォルト設定を使用する
-			err = api.ImportImagesFile(imageFiles, imagePdfPath, nil, config)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("画像からPDFへの変換失敗 %s: %s", file.Filename, err.Error())})
-				return
-			}
-			pdfFilePathsToMerge = append(pdfFilePathsToMerge, imagePdfPath)
-			fmt.Printf("画像変換 -> PDF: %s\n", imagePdfPath)
-
-		case ".pdf":
-			// 元のPDFをマージリストに追加
-			pdfFilePathsToMerge = append(pdfFilePathsToMerge, originalFilePath)
-			fmt.Printf("追加 PDF: %s\n", originalFilePath)
-
-		default:
-			// サポートされていないファイル形式は無視
-			fmt.Printf("無視 (未サポート形式): %s\n", file.Filename)
-		}
-	}
-
-	if len(pdfFilePathsToMerge) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "マージ対象の有効なファイルが見つかりません"})
-		return
-	}
-
-	// --- PDFマージ処理 (pdfcpu) ---
-	mergedPdfPath := filepath.Join(tempDir, "merged_output.pdf")
-
-	// 出力ファイルを作成 (io.Writer)
-	outFile, err := os.Create(mergedPdfPath)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("出力ファイル作成失敗: %s", err.Error())})
-		return
-	}
-	defer outFile.Close() // 必ず閉じる
-
-	// 入力ファイルを開いて io.ReadSeeker のスライスを作成
-	readers := make([]io.ReadSeeker, 0, len(pdfFilePathsToMerge))
-	filesToClose := []*os.File{} // 開いたファイルを記録して後で閉じる
+	// マージ対象となるPDFデータの io.ReadSeeker スライス
+	pdfDataToMerge := []io.ReadSeeker{}
+	// アップロードされたファイルのReaderを保持するスライス (後で閉じるため)
+	openedFiles := []multipart.File{}
 	defer func() {
-		for _, f := range filesToClose {
+		for _, f := range openedFiles {
 			f.Close()
 		}
 	}()
 
-	for _, pdfPath := range pdfFilePathsToMerge {
-		f, err := os.Open(pdfPath)
+	// pdfcpuの設定 (デフォルトを使用)
+	config := model.NewDefaultConfiguration()
+
+	for _, file := range files {
+		ext := strings.ToLower(filepath.Ext(file.Filename))
+		// originalFilePath := filepath.Join(tempDir, file.Filename) // 不要
+
+		// アップロードされたファイルをメモリで開く
+		src, err := file.Open()
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("入力PDFファイルオープン失敗 %s: %s", pdfPath, err.Error())})
-			return // エラー発生時は開いたファイルを defer で閉じる
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("ファイルオープン失敗 %s: %s", file.Filename, err.Error())})
+			return // 開いたファイルを defer で閉じる
 		}
-		readers = append(readers, f)
-		filesToClose = append(filesToClose, f)
+		openedFiles = append(openedFiles, src) // Close するためにリストに追加
+
+		// ファイル保存処理を削除
+		// if err := c.SaveUploadedFile(file, originalFilePath); err != nil { ... }
+
+		switch ext {
+		case ".png", ".jpg", ".jpeg":
+			// 画像データを読み込む
+			imgData, err := io.ReadAll(src)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("画像データ読み込み失敗 %s: %s", file.Filename, err.Error())})
+				return
+			}
+			// src を閉じる (ReadAll で読み終わったため)
+			src.Close() // Close openedFiles スライスからは削除しない (deferで Close するため問題ない)
+
+			// 画像をメモリ上でPDFに変換 (pdfcpu APIを使用)
+			// imagePdfPath := filepath.Join(tempDir, strings.TrimSuffix(file.Filename, ext)+".pdf") // 不要
+			pdfBuf := new(bytes.Buffer) // 変換後のPDFデータを格納するバッファ
+
+			// ImportImages は map[string]io.Reader を受け取る <- 修正: []io.Reader を使う
+			// imageReaders := map[string]io.Reader{
+			// 	file.Filename: bytes.NewReader(imgData), // ファイル名をキー、データリーダーを値とする
+			// }
+			// 画像データを Reader のスライスに入れる
+			imgReaders := []io.Reader{bytes.NewReader(imgData)}
+
+			// imp にデフォルト設定の構造体リテラルを渡す <- 修正: nil を使う
+			// imp := &model.Import{} // デフォルト設定の構造体リテラル
+			// err = api.ImportImages(imageReaders, pdfBuf, imp, config) // imp を渡す <- 修正: シグネチャ変更
+
+			// api.ImportImages を試す (第一引数 nil, 第四引数 imp nil)
+			// Linterが期待するシグネチャに合わせる試み:
+			// ImportImages(rs io.ReadSeeker, w io.Writer, readers []io.Reader, imp *Import, conf *model.Configuration)
+			err = api.ImportImages(nil, pdfBuf, imgReaders, nil, config)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("画像からPDFへの変換失敗 %s: %s", file.Filename, err.Error())})
+				return
+			}
+			// 変換後のPDFデータ (bytes.Buffer) から io.ReadSeeker を作成してリストに追加
+			pdfDataToMerge = append(pdfDataToMerge, bytes.NewReader(pdfBuf.Bytes()))
+			fmt.Printf("画像変換 -> メモリPDF: %s\n", file.Filename)
+
+		case ".pdf":
+			// PDFデータを読み込む
+			pdfData, err := io.ReadAll(src)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("PDFデータ読み込み失敗 %s: %s", file.Filename, err.Error())})
+				return
+			}
+			// src を閉じる
+			src.Close()
+
+			// メモリ上のPDFデータから io.ReadSeeker を作成してマージリストに追加
+			pdfDataToMerge = append(pdfDataToMerge, bytes.NewReader(pdfData))
+			fmt.Printf("追加 メモリPDF: %s\n", file.Filename)
+
+		default:
+			// サポートされていないファイル形式は無視
+			// src を閉じる (エラーにはしない)
+			src.Close()
+			fmt.Printf("無視 (未サポート形式): %s\n", file.Filename)
+		}
 	}
+
+	if len(pdfDataToMerge) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "マージ対象の有効なファイルが見つかりません"})
+		return
+	}
+
+	// --- PDFマージ処理 (メモリ上で実行) ---
+	// mergedPdfPath := filepath.Join(tempDir, "merged_output.pdf") // 不要
+	mergedPdfBuffer := new(bytes.Buffer) // マージ結果を格納するバッファ
+
+	// 出力ファイル作成処理を削除
+	// outFile, err := os.Create(mergedPdfPath) ...
+	// defer outFile.Close()
+
+	// 入力ファイルを開く処理を削除 (既に pdfDataToMerge に ReadSeeker がある)
+	// readers := make([]io.ReadSeeker, 0, len(pdfFilePathsToMerge)) ...
+	// filesToClose := []*os.File{} ...
+	// defer func() { ... }()
+	// for _, pdfPath := range pdfFilePathsToMerge { ... }
 
 	// MergeRaw は []io.ReadSeeker と io.Writer を受け取る
-	err = api.MergeRaw(readers, outFile, false, config)
+	// 入力は pdfDataToMerge、出力は mergedPdfBuffer
+	err = api.MergeRaw(pdfDataToMerge, mergedPdfBuffer, false, config) // 引数を修正
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("PDFマージ失敗: %s", err.Error())})
-		return // エラー発生時は開いたファイルを defer で閉じる
+		return // openedFiles の defer Close は実行される
 	}
 
-	fmt.Println("PDFマージ完了:", mergedPdfPath)
+	fmt.Println("PDFマージ完了: メモリ上")
 
 	// --- レスポンス ---
-	// マージされたPDFファイルを返す
-	c.FileAttachment(mergedPdfPath, "merged_output.pdf")
+	// マージされたPDFデータをメモリから直接返す
+	// c.FileAttachment(mergedPdfPath, "merged_output.pdf") // ファイルパス指定を削除
+
+	// レスポンスヘッダーを設定
+	c.Header("Content-Disposition", `attachment; filename="merged_output.pdf"`)
+	c.Data(http.StatusOK, "application/pdf", mergedPdfBuffer.Bytes())
+
 }
 
 // addImagePage 関数は不要になったため削除
